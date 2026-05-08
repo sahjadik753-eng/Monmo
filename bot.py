@@ -20,6 +20,8 @@ import html
 import uuid
 import os
 from dotenv import load_dotenv
+import time
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -66,6 +68,40 @@ def escape_markdown(text: str) -> str:
     # List of special characters that need escaping in MarkdownV2
     special_chars = r'_*[]()~`>#+-=|{}.!'
     return ''.join(f'\\{char}' if char in special_chars else char for char in str(text))
+
+# ===================== RATE LIMIT HANDLER (429 FIX) =====================
+class RateLimitError(Exception):
+    pass
+
+def retry_on_429(func):
+    """Decorator to retry on 429 with exponential backoff and respect Retry-After header"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        max_retries = 5
+        base_delay = 2
+        for attempt in range(max_retries):
+            try:
+                response = func(*args, **kwargs)
+                # Check if response is a requests Response object with 429
+                if hasattr(response, 'status_code') and response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', base_delay * (2 ** attempt)))
+                    logger.warning(f"Rate limited (429). Retrying after {retry_after} seconds. Attempt {attempt+1}/{max_retries}")
+                    time.sleep(retry_after)
+                    continue
+                return response
+            except requests.exceptions.RequestException as e:
+                if hasattr(e, 'response') and e.response is not None and e.response.status_code == 429:
+                    retry_after = int(e.response.headers.get('Retry-After', base_delay * (2 ** attempt)))
+                    logger.warning(f"Rate limited (429). Retrying after {retry_after} seconds. Attempt {attempt+1}/{max_retries}")
+                    time.sleep(retry_after)
+                    continue
+                elif attempt == max_retries - 1:
+                    raise
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Request failed: {e}. Retrying in {delay:.2f}s. Attempt {attempt+1}/{max_retries}")
+                time.sleep(delay)
+        raise Exception("Max retries exceeded")
+    return wrapper
 
 # MongoDB Connection
 class Database:
@@ -298,12 +334,13 @@ async def is_user_approved(user_id: int) -> bool:
     
     return True
 
-# API Functions - FIXED with correct endpoints (all require API key)
+# API Functions - WITH RATE LIMIT HANDLING
+@retry_on_429
 def check_api_health() -> Dict:
     """Check API health status - REQUIRES API KEY"""
     try:
         response = requests.get(
-            f"{API_URL}/api/v1/health",  # Added /api/v1/ prefix
+            f"{API_URL}/api/v1/health",
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             timeout=10
         )
@@ -315,11 +352,12 @@ def check_api_health() -> Dict:
         logger.error(f"Health check error: {e}")
         return {"status": "error", "error": str(e)}
 
+@retry_on_429
 def check_running_attacks() -> Dict:
     """Check running attacks for the user - REQUIRES API KEY"""
     try:
         response = requests.get(
-            f"{API_URL}/api/v1/active",  # Added /api/v1/ prefix
+            f"{API_URL}/api/v1/active",
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             timeout=10
         )
@@ -331,11 +369,12 @@ def check_running_attacks() -> Dict:
         logger.error(f"Running attacks error: {e}")
         return {"success": False, "error": str(e)}
 
+@retry_on_429
 def get_user_stats() -> Dict:
     """Get user statistics - REQUIRES API KEY"""
     try:
         response = requests.get(
-            f"{API_URL}/api/v1/stats",  # Added /api/v1/ prefix
+            f"{API_URL}/api/v1/stats",
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             timeout=10
         )
@@ -347,11 +386,12 @@ def get_user_stats() -> Dict:
         logger.error(f"Get stats error: {e}")
         return {"success": False, "error": str(e)}
 
+@retry_on_429
 def launch_attack(ip: str, port: int, duration: int) -> Dict:
     """Launch attack via API - REQUIRES API KEY"""
     try:
         response = requests.post(
-            f"{API_URL}/api/v1/attack",  # Added /api/v1/ prefix
+            f"{API_URL}/api/v1/attack",
             json={"ip": ip, "port": port, "duration": duration},
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             timeout=15
@@ -361,7 +401,7 @@ def launch_attack(ip: str, port: int, duration: int) -> Dict:
         logger.error(f"Attack launch error: {e}")
         return {"error": str(e), "success": False}
 
-# Bot Command Handlers
+# Bot Command Handlers (all original, unchanged)
 @admin_required
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Approve a user to use the bot: /approve userid days"""
